@@ -833,9 +833,18 @@ impl MD005ListIndent {
             group.sort_by_key(|(line_num, _, _)| *line_num);
 
             if level == 1 {
-                // Top-level items should have the configured indentation
+                // Top-level items should have the configured indentation.
+                // Inside a blockquote, indentation is measured from the blockquote's
+                // own content start, not from column 0 — the quote may itself be
+                // indented, as it is when nested in a list item. Comparing the raw
+                // indent there would move the list out from under its blockquote
+                // markers and split the quote across two indents.
                 for (line_num, indent, line_info) in &group {
-                    if *indent != self.top_level_indent {
+                    let effective_indent = match line_info.blockquote.as_ref() {
+                        Some(bq) => indent.saturating_sub(bq.marker_column),
+                        None => *indent,
+                    };
+                    if effective_indent != self.top_level_indent {
                         warnings.push(self.create_indent_warning(
                             ctx,
                             *line_num,
@@ -1939,5 +1948,64 @@ Even more text";
                 "Fixed content should preserve nested blockquote prefix, got: {fixed:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_list_in_indented_blockquote_not_flagged() {
+        use crate::rule::Rule;
+
+        // The blockquote sits inside a list item, so its markers are indented.
+        // The list inside it starts at the blockquote's own content column and is
+        // therefore correctly indented, however far the blockquote itself is in.
+        let rule = MD005ListIndent::default();
+        let content = "\
+1. **Ask for a specific audience**
+   - Say who the writing is for.
+
+   Weak version:
+
+   > \"Write something about rabbits.\"
+
+   Better version:
+
+   > \"I need a short piece about rabbits. It should be:
+   >
+   > 1. Easy to follow
+   > 2. Practical
+   >
+   > Please give me an outline.\"
+";
+        let ctx = LintContext::new(content, crate::config::MarkdownFlavor::Standard, None);
+        let result = rule.check(&ctx).unwrap();
+        assert!(
+            result.is_empty(),
+            "List inside an indented blockquote should not be flagged: {result:?}"
+        );
+
+        // And the fix must leave it alone rather than move it out of the quote
+        assert_eq!(rule.fix(&ctx).expect("fix should succeed"), content);
+    }
+
+    #[test]
+    fn test_inconsistent_sublist_in_indented_blockquote_still_flagged() {
+        use crate::rule::Rule;
+
+        // Sibling items at different indents are still reported inside a
+        // blockquote, and inside one that is itself indented
+        let rule = MD005ListIndent::default();
+        let content = "\
+   > * Level 1
+   >    * Level 2
+   >      * Level 3
+   >    * Back to 2
+   >       1. Ordered 3
+   >      2. Still 3
+   > * Back to 1
+";
+        let ctx = LintContext::new(content, crate::config::MarkdownFlavor::Standard, None);
+        assert!(
+            !rule.check(&ctx).unwrap().is_empty(),
+            "Inconsistent sublist indent inside an indented blockquote should still be flagged"
+        );
     }
 }
